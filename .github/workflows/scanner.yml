@@ -1,0 +1,63 @@
+name: PO3 Signal Scanner
+
+on:
+  schedule:
+    # Run 5 minutes after each UTC hour so the 1h candle is fully closed.
+    - cron: "5 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: print signals in the log, send nothing, don't touch state"
+        type: boolean
+        default: false
+      telegram_test:
+        description: "Only send a Telegram test message to verify the secrets"
+        type: boolean
+        default: false
+
+# contents: write is needed only to push the 'scanner-state' branch (sent-signal registry).
+permissions:
+  contents: write
+
+# One run at a time: prevents two overlapping runs from racing on the state branch
+# (and from double-sending). A queued run waits instead of being cancelled.
+concurrency:
+  group: po3-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Load sent-signal state
+        run: bash scripts/state_branch.sh load
+
+      - name: Run scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          TELEGRAM_TEST: ${{ inputs.telegram_test }}
+        run: |
+          ARGS=""
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "$TELEGRAM_TEST" = "true" ]; then ARGS="$ARGS --telegram-test"; fi
+          python scanner.py $ARGS
+
+      # Runs even if the scan step failed part-way, so signals that WERE delivered stay recorded.
+      - name: Save sent-signal state
+        if: always()
+        run: bash scripts/state_branch.sh save
